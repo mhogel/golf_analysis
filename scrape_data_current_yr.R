@@ -5,8 +5,6 @@ library(jsonlite)
 library(janitor)
 
 ##### get tournament schedule and IDs ----
-years <- seq(from = 2020, to = 2016, by = -1)
-
 grab_id <- "[[:digit:]]+"
 grab_tournament_name <- "(?<=>).*(?=</option)" 
 grab_date <- "(?<=>).*(?=</span)"
@@ -17,52 +15,47 @@ tournament_dates <- character()
 tournament_year <- character()
 tournament_sites <- character()
 
-for(y in 1:length(years)) {
+url <- paste0('https://www.espn.com/golf/leaderboard/_/tournamentId/401242997/')
+webpage <- read_html(url)
+
+tournament_id_data <- webpage %>% 
+  html_nodes('optgroup') %>% 
+  html_nodes('option')
+
+#loop id_data and grab tournament ids and names for individual seasons
+for(i in 1:length(tournament_id_data)){
+  to_string <- toString(tournament_id_data[i])
+  #tournament ids
+  tournament_id <- str_extract(to_string, grab_id)
+  tournament_ids <- c(tournament_ids, tournament_id)
   
-  url <- paste0('https://www.espn.com/golf/leaderboard/_/tournamentId/401155476/season/', years[y])
+  #tournament names
+  tournament_name <- str_extract(to_string, grab_tournament_name)
+  tournament_names <- c(tournament_names, tournament_name)
+  
+  #tournament dates
+  url <- paste0('https://www.espn.com/golf/leaderboard/_/tournamentId/', tournament_id)
   webpage <- read_html(url)
   
-  tournament_id_data <- webpage %>% 
-    html_nodes('optgroup') %>% 
-    html_nodes('option')
+  tournament_date <- webpage %>% 
+    html_nodes('span.Leaderboard__Event__Date.n7') %>% 
+    toString() %>% 
+    str_extract(grab_date)
+  tournament_dates <- c(tournament_dates, tournament_date)
   
-  #loop id_data and grab tournament ids and names for individual seasons
-  for(i in 1:length(tournament_id_data)){
-    to_string <- toString(tournament_id_data[i])
-    #tournament ids
-    tournament_id <- str_extract(to_string, grab_id)
-    tournament_ids <- c(tournament_ids, tournament_id)
-    
-    #tournament names
-    tournament_name <- str_extract(to_string, grab_tournament_name)
-    tournament_names <- c(tournament_names, tournament_name)
-    
-    #tournament dates
-    url <- paste0('https://www.espn.com/golf/leaderboard/_/tournamentId/', tournament_id)
-    webpage <- read_html(url)
-    
-    tournament_date <- webpage %>% 
-      html_nodes('span.Leaderboard__Event__Date.n7') %>% 
-      toString() %>% 
-      str_extract(grab_date)
-    tournament_dates <- c(tournament_dates, tournament_date)
-    
-    tournament_site <- webpage %>%
-      html_nodes('div.Leaderboard__Course__Location.n8') %>%
-      toString() %>%
-      str_extract("(?<=>).*(?=<!-- --> -)")
-    tournament_sites <- c(tournament_sites, tournament_site)
-  }
-  
-  tournament_year <- c(tournament_year, rep(years[y], length(tournament_id_data)))
-  
+  tournament_site <- webpage %>%
+    html_nodes('div.Leaderboard__Course__Location.n8') %>%
+    toString() %>%
+    str_extract("(?<=>).*(?=<!-- --> -)")
+  tournament_sites <- c(tournament_sites, tournament_site)
 }
 
-tournaments <- data.frame(tournament_ids, tournament_year, tournament_sites, tournament_names, tournament_dates, stringsAsFactors = F) %>%
+tournaments <- data.frame(tournament_ids, tournament_year = 2021, tournament_sites, tournament_names, tournament_dates, stringsAsFactors = F) %>%
   mutate(start_date = gsub(" - .+,", ",", tournament_dates),
-         start_date = parse_date_time(start_date, orders = c("B d, Y", "b d, Y")))
+         start_date = gsub("Oct ", "October ", start_date),
+         start_date = as.Date(start_date, format = "%B %d, %Y"))
 
-saveRDS(tournaments, here::here("tournament_list.rData"))
+saveRDS(tournaments, here::here("tournament_list_curyr.rData"))
 
 ##### pull leaderboard data for each tournament ----
 
@@ -78,9 +71,11 @@ scores <- tibble(pos = numeric(),
                  earnings = numeric(),
                  fedex_pts = numeric())
 
-ignore_list <- c(401220113, 401056524, 401077168)
+ignore_list <- c(401251634)
+
 tournament_ids <- tournaments %>%
-  filter(!tournament_ids %in% ignore_list) %>%
+  filter(!tournament_ids %in% ignore_list,
+         start_date <= (Sys.Date() - 4)) %>%
   pull(tournament_ids)
 
 for( t in 1:length(tournament_ids)){
@@ -140,4 +135,4 @@ for( t in 1:length(tournament_ids)){
   scores <- rbind(scores, leaderboard)
 }
 
-saveRDS(scores, here::here("leaderboard_scrape_cumulative.rData"))
+saveRDS(scores, here::here("leaderboard_scrape_curyr.rData"))
