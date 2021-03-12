@@ -1,4 +1,4 @@
-
+library(fitdistrplus)
 library(dplyr)
 library(readxl)
 library(tidyr)
@@ -7,7 +7,7 @@ library(ggplot2)
 
 ##### load data ----
 
-base_folder <- "Players_2021"
+base_folder <- "ArnoldPalmer_2021"
 
 source(here::here("predict_script_functions.R"))
 
@@ -32,7 +32,6 @@ tourneys_list <- rbind(
            tournament_names == "Genesis Open" ~ "The Genesis Invitational",
            grepl("Mexico", tournament_names) ~"WGC-Workday Championship",
            grepl("Arnold Palmer", tournament_names) ~ "Arnold Palmer Invitational Pres. By Mastercard",
-           grepl("players", tolower(tournament_names)) ~ "THE PLAYERS Championship",
            T ~ tournament_names))
 
 field <- read_excel(here::here(base_folder, "field.xlsx"), col_names = F) %>%
@@ -41,10 +40,10 @@ field <- read_excel(here::here(base_folder, "field.xlsx"), col_names = F) %>%
 
 ##### set parameters ----
 
-st_dt <- as.Date("2021-03-11")
-tourney_name <- "THE PLAYERS Championship"
-course <- "TPC Sawgrass"
-cut_line <- 70
+st_dt <- as.Date("2021-03-04")
+tourney_name <- "Arnold Palmer Invitational Pres. By Mastercard"
+course <- "Bay Hill Club &amp; Lodge"
+cut_line <- 65
 ignore_list <- c(401220113, 401056524, 401077168, 401251634)
 
 # manually dampen the deviation - not the best method
@@ -107,95 +106,108 @@ Tourney_Weights %>%
   filter(tournament_year == 2021) %>%
   select(tournament_names, tournament_sites, start_date)
 
-Tourney_Weights$value[Tourney_Weights$tournament_year == 2021] <- c(5,2,4:1)
+Tourney_Weights$value[Tourney_Weights$tournament_year == 2021] <- c(2,5:1)
 Tourney_Weights$full_weight <- Tourney_Weights$value + Tourney_Weights$course
 Tourney_Weights$full_weight[Tourney_Weights$full_weight < 1] <- 1
 
 ##### establish player sampling parameters ----
 
-Golfer_Scores <- player_data %>%
-  filter(player %in% tourney_field$player) %>%
-  left_join(Tourney_Weights, by = c("tournament_names", "tournament_year")) %>%
-  mutate(Weighted_Score = Score * full_weight) %>%
-  group_by(player) %>%
-  mutate(Weighted_Avg = sum(Weighted_Score) / sum(full_weight),
-         Weighted_sd_Rd = (Score - Weighted_Avg)^2 * full_weight,
-         Total_Weighted_sd = sqrt(sum(Weighted_sd_Rd)/sum(full_weight) * ((n()-1)/n()))* Sd_Skew) %>%
-  select(player, Weighted_Avg, Total_Weighted_sd) %>%
-  distinct()
+# generate player data to feed into beta sampling
 
-(tourney_min <- min(Tourney_History$Score))
-(tourney_max <- max(Tourney_History$Score))
+player_samples <- data.frame()
+
+for(i in 1:nrow(Tourney_Weights)) {
+  
+  df <- player_data %>%
+    ungroup() %>%
+    filter(tournament_year == Tourney_Weights[i,"tournament_year"],
+           tournament_names == Tourney_Weights[i, "tournament_names"]) %>%
+    select(player, Score)
+  
+  player_samples <- rbind(player_samples,
+                          do.call("rbind" ,replicate(Tourney_Weights[i, "full_weight"], df, simplify = F)))
+}
+
+player_samples <- player_samples %>%
+  filter(player %in% tourney_field$player) %>%
+  mutate(Score_std = (abs(Score - max(Score))) / (max(Score) - min(Score)),
+         Score_std = case_when(
+           Score_std == 1 ~ max(Score_std[Score_std < 1]),
+           Score_std == 0 ~ min(Score_std[Score_std > 0]),
+           T ~ Score_std
+         ))
+
+beta_key <- tibble(player_samples) %>%
+  select(player) %>%
+  distinct() %>%
+  mutate(beta = I(list(NA)))
+
+for(i in 1:nrow(beta_key)) {
+  
+  db <- player_samples %>%
+    filter(player == tmp$player[i]) %>%
+    pull(Score_std)
+  
+  beta_key$beta[i] <- list(fitdist(db, "beta")$estimate)
+  
+}
+
+historical_scores <- Tourney_History %>%
+  mutate(score_std = abs(Score - max(Score)) / (max(Score) - min(Score))) %>%
+  select(Score, score_std) %>%
+  distinct() %>%
+  arrange(Score)
+
+tourney_beta <- fitdist(tourney_std$score_std, "beta")$estimate
+
+tourney_prob <- Tourney_History %>%
+  arrange(Score) %>%
+  mutate(rk = 1:n(),
+         prob = 1-(rk / max(rk)))
 
 Standardized_Scores <- data.frame(Score = seq(from = tourney_min, to = tourney_max)) %>%
-  mutate(z.score = (Score - Tourney_Avg)/Tourney_Sd)
+  mutate(z.score = (Score - Tourney_Avg)/Tourney_Sd,
+         score_std = abs(z.score - max(z.score)) / (max(z.score) - min(z.score)))
 
-Tourney_Preds <- as.data.frame(tourney_field) %>%
-  select(player) %>%
-  left_join(Golfer_Scores, by = "player")
 
-temp_db <- matrix(nrow = nrow(Tourney_Preds), ncol = nrow(Standardized_Scores),
-                  dimnames = list(Tourney_Preds$player, Standardized_Scores$Score))
-
-Score_Matrix <- as.data.frame(temp_db) %>%
-  mutate(player = rownames(temp_db)) %>%
-  pivot_longer(cols = -player, names_to = "Score", values_to = "temp") %>%
-  mutate(Score = as.numeric(Score)) %>%
-  arrange(player) %>%
-  left_join(Standardized_Scores, by = "Score") %>%
-  left_join(Tourney_Preds, by = "player") %>%
-  mutate(Total_Weighted_sd = 2*Total_Weighted_sd,
-         Score.Prob = pnorm(z.score, Weighted_Avg, Total_Weighted_sd)) %>%
-  select(-temp)
-
-player_avg_pred <- Tourney_Preds %>%
-  mutate(avg_score = sapply(Weighted_Avg, function(x) max(Standardized_Scores$Score[Standardized_Scores$z.score <= x]))) %>%
-  select(-c(Total_Weighted_sd, Weighted_Avg))
-  
 ##### Model tournament ----
-
 Repeats <- 10000
-Rounds <- c("Rd1", "Rd2", "Rd3", "Rd4")
-
-Ongoing_Tally <- data.frame()
-
-base_db <- Tourney_Preds %>%
-  filter(!is.na(Weighted_Avg)) %>%
-  select(player)
-
-start <- Sys.time()
-
-board <- do.call("rbind", replicate(Repeats, base_db %>% select(player), simplify = F)) %>%
-  group_by(player) %>%
-  mutate(Run = rank(player, ties.method = "first"))
-
-for(i in 1:length(Rounds)) {
+beta_board <- data.frame()
+for(i in 1:nrow(beta_key)) {
   
-  results <- board %>%
-    mutate(prob = runif(n()),
-           Score = mapply(find_score, player, prob),
-           prob.2 = runif(n()),
-           Score.2 = ifelse(Score < tourney_min, mapply(find_score, player, prob.2), NA),
-           Score.2 = ifelse(Score.2 > round(Tourney_Avg), round(Tourney_Avg), Score.2),
-           Score = ifelse(is.na(Score.2), Score, Score.2)) %>%
-    select(player, Run, Score)
+  get_score <- rbeta(Repeats * 4, beta_key$beta[[i]][1], beta_key$beta[[i]][2])
+#  get_p <- qbeta(get_score, tourney_beta[[1]], tourney_beta[[2]])
+#  get_p[get_p > max(tourney_prob$prob)] <- max(tourney_prob$prob)
+#  final_score <- sapply(get_score, function(x) min(historical_scores$Score[historical_scores$score_std <= x]))
+#  final_score <- sapply(get_p, function(x) max(tourney_prob$Score[tourney_prob$prob >= x]))
+#  get_score[get_score > max(tourney_prob$prob)] <- max(tourney_prob$prob)
+#  final_score <- sapply(get_score, function(x) max(tourney_prob$Score[tourney_prob$prob >= x]))
   
-  results[results == "-Inf"] <- tourney_min - 1
-  
-  board[Rounds[i]] <- results$Score
+  beta_board <- rbind(beta_board,
+                      as.data.frame(matrix(get_score, ncol = 4)) %>% 
+                        setNames(c(paste0("Rd", 1:4))) %>% 
+                        mutate(player = beta_key$player[i],
+                               Run = seq(from = 1, to = n())))
   
 }
 
-end <- Sys.time()
-(total <- end - start)
+beta_board <- select(beta_board, player, Run, matches("Rd"))
 
-saveRDS(board, here::here(base_folder,"Tourney_Results.rds"))
-if(!exists("board")) {
-  board <- readRDS(here::here(base_folder,"Tourney_Results.rds"))
+trnslt <- function(x) {
+  
+  h <- rank(-x)
+  h <- 1 - h / max(h)
+  sapply(h, function(x) max(tourney_prob$Score[tourney_prob$prob > x]) )
+  
 }
 
+for(i in 3:6){
+  beta_board[,i] <- trnslt(beta_board[,i])
+}
 
-Ongoing_Tally <- board %>%
+beta_board[,3:6][beta_board[,3:6] == "-Inf"] <- tourney_min
+
+Ongoing_Tally <- beta_board %>%
   group_by(Run) %>%
   mutate(r2_rank = rank(Rd1 + Rd2, ties.method = "min"),
          Full.Score = Rd1 + Rd2 + Rd3 + Rd4,
@@ -221,13 +233,13 @@ Final.Results <- Ongoing_Tally %>%
 
 # pull rounds
 
-Rounds_Long <- rbind(board[,c(1,3)] %>% setNames(c("player", "Score")),
-                     board[,c(1,4)] %>% setNames(c("player", "Score"))) %>%
+Rounds_Long <- rbind(beta_board[,c(1,3)] %>% setNames(c("player", "Score")),
+                     beta_board[,c(1,4)] %>% setNames(c("player", "Score"))) %>%
   group_by(player) %>%
   mutate(Run = rank(player, ties.method = "first"),
          player = tolower(player))
 
-rbind(Rounds_Long %>% ungroup() %>% select(Score) %>% mutate(Method = "Predict"),
+rbind(Rounds_Long_test %>% ungroup() %>% select(Score = adjusted_score) %>% mutate(Method = "Predict"),
                       Tourney_History %>% select(Score) %>% mutate(Method = "Actual")) %>%
   group_by(Method, Score) %>%
   count() %>%
@@ -620,6 +632,17 @@ value_df <- rbind(
     mutate(max_edge = Edge)
 )
 
+##### analyze options ----
+
+val_check <- value_df %>%
+  filter(
+    (category %in% c("R1Matches", "TourneyMatches") & max_edge >= 0.06) |
+      (category %in% c("R13Balls") & max_edge >= 0.09) |
+      max_edge > 0
+  )
+
+Player_Report("R1Matches", 13, site = "bodog" , var = "round")
+
 ##### output tournament package ----
 
 output_list <- list(
@@ -636,16 +659,3 @@ output_list <- list(
 
 saveRDS(output_list, here::here(base_folder, paste0("Tourney package_", base_folder, ".rds")))
 file.remove(here::here(base_folder, "Tourney_Results.rds"))
-
-##### analyze options ----
-
-val_check <- value_df %>%
-  filter(
-    (category %in% c("R1Matches", "TourneyMatches") & max_edge >= 0.06) |
-      (category %in% c("R13Balls") & max_edge >= 0.09) |
-      (category == "SixShooter" & max_edge >= 0.15) |
-      (!category %in% c("R1Matches", "TourneyMatches", "R13Balls", "SixShooter") & Edge > 0)
-  )
-
-Player_Report("R1Matches", 47, "bodog", var = "round")
-

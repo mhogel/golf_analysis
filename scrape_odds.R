@@ -7,6 +7,13 @@ odds_files <- list.files(here::here(base_folder, "odds_scrape"))
 odds_package <- list()
 
 html_key <- list(
+  FRL = list(
+    nm = ".gl-ParticipantBorderless_Name",
+    od = ".gl-ParticipantBorderless_Odds",
+    gs = 1,
+    cn = 0,
+    ties = F
+  ),
   MakeCut = list(
     nm = ".srb-ParticipantLabel_Name",
     od = ".gl-ParticipantOddsOnly_Odds",
@@ -35,7 +42,7 @@ html_key <- list(
     cn = NA,
     ties = F
   ),
-  SixShooter = list(
+  R1SixShooter = list(
     nm = ".gl-ParticipantBorderless_Name",
     od = ".gl-ParticipantBorderless_Odds",
     gs = 6,
@@ -55,11 +62,19 @@ html_key <- list(
     gs = 2,
     cn = 1,
     ties = T
+  ),
+  FRL = list(
+    nm = ".gl-ParticipantBorderless_Name",
+    od = ".gl-ParticipantBorderless_Odds",
+    gs = 1,
+    cn = 0,
+    ties = F
   )
 )
 
 # grab 365 odds
 files_365 <- odds_files[which(grepl("365", odds_files))]
+files_365 <- files_365[!grepl("Groups", files_365)]
 
 for(i in 1:length(files_365)) {
   url <- files_365[i]
@@ -106,14 +121,14 @@ for(i in 1:length(files_365)) {
       mutate(odds = odds[(2/3 * length(odds) + 1): length(odds)])
   }
   
-  if(file_name == "Outright") {
+  if(file_name %in% c("Outright", "FRL")) {
     odds_package[[file_name]][["365"]] <-
       db %>%
       mutate(odds = odds)
   }
   
-  if(file_name == "SixShooter") {
-    odds_package[[file_name]][["365"]] <-
+  if(file_name == "R1SixShooter") {
+    odds_package[["SixShooter"]][["365"]] <-
       db %>%
       mutate(Tag = rep(1:(length(nms)/tmp$gs), each = tmp$gs),
              odds = odds)
@@ -130,6 +145,7 @@ for(i in 1:length(files_365)) {
       db <- rbind(db, data.frame(
         player = "Tie",
         Tag = 1:(length(nms)/tmp$gs),
+        site = "365",
         tag_order = 1.5
       ))
     }
@@ -149,7 +165,7 @@ for(i in 1:length(files_365)) {
 ##### bodog scrape ----
 
 files_bodog <- odds_files[which(grepl("bodog", odds_files))]
-main_names <- c("Outright","Top5", "Top10", "Top20", "MakeCut", "MissCut", "TourneyMatches", "SixShooter", "R13Balls")
+main_names <- c("FRL","Outright","Top5", "Top10", "Top20", "MakeCut", "MissCut", "TourneyMatches", "SixShooter", "R13Balls", "R1Matches")
 
 html_key_bd <- list(
   Outright = list(
@@ -182,24 +198,38 @@ html_key_bd <- list(
     txt = "Miss",
     gs = 1
   ),
-  TourneyMatches = list(
-    f_nm = "main",
+  R1Matches = list(
+    f_nm = "Matchups",
     txt = "1st Round Match Up",
     gs = 2
   ),
   SixShooter = list(
     f_nm = "main",
-    txt = "Six Shooter",
+    txt = "Six[[:space:]]*.hooter",
     gs = 6
   ),
   R13Balls = list(
-    f_nm = "R1Balls",
+    f_nm = "3Balls",
     txt = "3 Balls",
     gs = 3
+  ),
+  TourneyMatches = list(
+    f_nm = "Matchups",
+    txt = "Tournament Match Up",
+    gs = 2
+  ),
+  FRL = list(
+    f_nm = "main",
+    txt = "(1st|First) Round Leader",
+    1
   )
 )
 
 for(i in 1:length(main_names)) {
+
+# include if not all bodog odds have been posted  
+  if(i %in% c(6,7)) {next}
+  
   cur_nm <- main_names[i]
   tmp <- html_key_bd[[cur_nm]]
   
@@ -215,19 +245,39 @@ for(i in 1:length(main_names)) {
     tgt <- min(which(map_lgl(pull, ~ grepl(tmp$txt, .x))))
     base <- pull[[tgt]]
     
-    
     if(cur_nm %in% c("TourneyMatches", "SixShooter", "R13Balls")) {
-      nms <- base %>% html_nodes(".markets-container") %>%  html_nodes(".outcomes") %>% html_text()
-      odds <- base %>% html_nodes(".markets-container") %>%  html_nodes(".bet-price") %>% html_text() %>% gsub("^\r\n[[:space:]]*(.+)\r\n.+$", "\\1", .)
+      
+      get_nms <- base %>% html_nodes(".market-name") %>% html_text()
+      
+      if(cur_nm == "SixShooter"){
+        nd_num <- which(grepl("Six", get_nms))
+      } else {nd_num <- which(grepl(".", get_nms))}
+      
+      nms <- base %>% html_nodes(".markets-container") %>% .[nd_num] %>%  html_nodes(".outcomes") %>% html_text()
+      odds <- base %>% html_nodes(".markets-container") %>% .[nd_num] %>%  html_nodes(".bet-price") %>% html_text() %>% gsub("^\r\n[[:space:]]*(.+)\r\n.+$", "\\1", .)
     } else {
       temp <- base %>% html_nodes(".markets-container")
-      nd_num <- which(map_lgl(temp, ~ grepl(tmp$txt, .x)))[1]
+      nd_num <- which(map_lgl(temp, ~ grepl(tmp$txt, .x)))
+      
+      if(cur_nm == "R1Matches") {
+      } else if(grepl("(Top[[:space:]]*5|Top[[:space:]]*10)", cur_nm)) {
+        nd_num <- nd_num[2]} else {
+          nd_num <- nd_num[1]}
       
       nms <- base %>% html_nodes(".markets-container") %>% .[nd_num] %>% html_nodes(".outcomes") %>% html_text()
       odds <- base %>% html_nodes(".markets-container") %>% .[nd_num] %>% html_nodes(".bet-price") %>% html_text() %>% gsub("^\r\n[[:space:]]*(.+)\r\n.+$", "\\1", .)
       
     }
+  } else if(cur_nm %in% c("TourneyMatches", "R1Matches")) {
+    
+    temp <- pull %>% html_nodes(".markets-container")
+    nd_num <- which(map_lgl(temp, ~ grepl(tmp$txt, .x)))
+    
+    nms <- temp %>% .[nd_num] %>% html_nodes(".outcomes") %>% html_text()
+    odds <- temp %>% .[nd_num] %>% html_nodes(".bet-price") %>% html_text() %>% gsub("^\r\n[[:space:]]*(.+)\r\n.+$", "\\1", .)
+
   } else {
+    
     nms <- pull %>% html_nodes(".markets-container") %>%  html_nodes(".outcomes") %>% html_text()
     odds <- pull %>% html_nodes(".markets-container") %>%  html_nodes(".bet-price") %>% html_text() %>% gsub("^\r\n[[:space:]]*(.+)\r\n.+$", "\\1", .)
     
@@ -241,7 +291,7 @@ for(i in 1:length(main_names)) {
     stringsAsFactors = F
   ) 
   
-  if(cur_nm %in% c("TourneyMatches", "SixShooter", "R13Balls")){
+  if(cur_nm %in% c("TourneyMatches", "SixShooter", "R13Balls", "R1Matches")){
     
     db <- mutate(db, Tag = rep(1:(length(nms)/tmp$gs), each = tmp$gs))
   }
@@ -254,7 +304,8 @@ odds_df <- odds_package %>%
   map_dfr(.f = ~ .x %>% map_dfr(rbind,
                                 .id = "site"),
   .id = "category") %>%
-  mutate(odds = as.numeric(odds),
+  mutate(odds = gsub("EVEN", "+100", odds),
+         odds = as.numeric(odds),
          Prob = Prob_Calc(odds),
          Return = ifelse(odds > 0, odds, 100^2/abs(odds)),
          player = tolower(player))
